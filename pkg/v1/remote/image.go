@@ -91,9 +91,9 @@ func Image(ref name.Reference, options ...ImageOption) (v1.Image, error) {
 	return img.Open()
 }
 
-func (r *remoteImage) url(resource, identifier string) url.URL {
+func (r *remoteImage) url(scheme, resource, identifier string) url.URL {
 	return url.URL{
-		Scheme: r.ref.Context().Registry.Scheme(),
+		Scheme: scheme,
 		Host:   r.ref.Context().RegistryStr(),
 		Path:   fmt.Sprintf("/v2/%s/%s/%s", r.ref.Context().RepositoryStr(), resource, identifier),
 	}
@@ -112,24 +112,35 @@ func (r *remoteImage) RawManifest() ([]byte, error) {
 		return r.manifest, nil
 	}
 
-	u := r.url("manifests", r.ref.Identifier())
-	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	// TODO(jonjohnsonjr): Accept OCI manifest, manifest list, and image index.
-	req.Header.Set("Accept", string(types.DockerManifestSchema2))
-	resp, err := r.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	var manifest []byte
+	var req *http.Request
+	var resp *http.Response
+	var err error
+	for _, scheme := range []string{"https", "http"} {
+		u := r.url(scheme, "manifests", r.ref.Identifier())
+		req, err = http.NewRequest(http.MethodGet, u.String(), nil)
+		if err != nil {
+			continue
+		}
+		// TODO(jonjohnsonjr): Accept OCI manifest, manifest list, and image index.
+		req.Header.Set("Accept", string(types.DockerManifestSchema2))
+		resp, err = r.client.Do(req)
+		if err != nil {
+			// Errors here are connection errors, continue to try next protocol
+			continue
+		}
+		defer resp.Body.Close()
 
-	if err := CheckError(resp, http.StatusOK); err != nil {
-		return nil, err
-	}
+		if err = CheckError(resp, http.StatusOK); err != nil {
+			return nil, err
+		}
 
-	manifest, err := ioutil.ReadAll(resp.Body)
+		manifest, err = ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		break
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -201,8 +212,15 @@ func (rl *remoteLayer) Digest() (v1.Hash, error) {
 
 // Compressed implements partial.CompressedLayer
 func (rl *remoteLayer) Compressed() (io.ReadCloser, error) {
-	u := rl.ri.url("blobs", rl.digest.String())
-	resp, err := rl.ri.client.Get(u.String())
+	var err error
+	var resp *http.Response
+	for _, scheme := range []string{"https", "http"} {
+		u := rl.ri.url(scheme, "blobs", rl.digest.String())
+		resp, err = rl.ri.client.Get(u.String())
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
